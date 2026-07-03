@@ -164,9 +164,7 @@ app.post('/api/jobs/deploy', async (req, res) => {
     const cleanToken = renterToken.replace('Bearer ', '').trim();
     const { userScript, targetNodeId } = req.body;
 
-    if (!userScript) {
-        return res.status(400).json({ error: "Missing userScript payload" });
-    }
+    const cleanScript = userScript || "";
 
     if (!targetNodeId) {
         return res.status(400).json({ error: "You must specify a targetNodeId to route your computation globally." });
