@@ -194,11 +194,11 @@ app.post('/api/jobs/deploy', async (req, res) => {
         targetNode.status = "BUSY";
 
         targetNode.ws.send(JSON.stringify({
-            type: 'EXECUTE_JOB',
-            jobId: jobId,
-            image: 'python:3.10-slim',
-            command: userScript
-        }));
+    type: 'EXECUTE_JOB',
+    jobId: jobId,
+    image: 'dorowu/ubuntu-desktop-lxde-vnc', // Pre-packaged Ubuntu OS with a full web GUI engine
+    command: "" // No explicit script execution needed; they will control it manually!
+}));
 
         const executionPromise = new Promise((resolve) => {
             activeJobs.set(jobId, resolve);
