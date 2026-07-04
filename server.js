@@ -166,7 +166,7 @@ app.post('/api/jobs/deploy', async (req, res) => {
         const { targetNodeId } = req.body;
 
         // 2. Generate clean session deployment tracking IDs
-        const jobId = 'job_' + Math.random().toString(36).substring(2, 11);
+        const jobId = uuidv4();
 
         // 3. Look up active target element from onlineNodes tracking registry map
         const targetNode = onlineNodes.get(targetNodeId); 
