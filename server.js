@@ -31,7 +31,7 @@ const pgPool = new Pool({
 
         await pgPool.query(`
             CREATE TABLE IF NOT EXISTS compute_jobs (
-                job_id UUID PRIMARY KEY,
+                job_id VARCHAR(50) PRIMARY KEY,
                 assigned_node_id VARCHAR(50) NOT NULL,
                 container_image VARCHAR(100) NOT NULL,
                 status VARCHAR(20) NOT NULL,
@@ -46,7 +46,7 @@ const pgPool = new Pool({
 })();
 
 const app = express();
-app.use(express.json());
+app.use(express.json()); // Essential body parser module config
 app.use(cors()); 
 
 // Dynamic tracking loops
@@ -110,7 +110,7 @@ wss.on('connection', async (ws, req) => {
             const redisKey = `node:status:Node-${nodeId}`;
             await redisClient.set(redisKey, JSON.stringify({
                 id: `Node-${nodeId}`,
-                specs: { cpu: 1, ram: "512MB" },
+                specs: { cpu: 1, ram: "2GB" }, // Updated RAM status payload profile
                 status: onlineNodes.get(`Node-${nodeId}`)?.status || "IDLE"
             }), { EX: 25 });
             return;
@@ -126,6 +126,12 @@ wss.on('connection', async (ws, req) => {
             if (onlineNodes.has(`Node-${nodeId}`)) {
                 onlineNodes.get(`Node-${nodeId}`).status = "IDLE";
             }
+            
+            // Update table state row to completed
+            await pgPool.query(
+                'UPDATE compute_jobs SET status = $1 WHERE job_id = $2',
+                ['COMPLETED', data.jobId]
+            );
         }
     });
 
@@ -153,48 +159,58 @@ app.get('/api/nodes', async (req, res) => {
     }
 });
 
-// Global Renter Deploy Endpoint with security verification and dynamic location routing
-app.post('/api/jobs/deploy', async (res, req) => {
-    // 1. Extract parameters from the request body
-    const { userScript, targetNodeId } = req.body;
+// Global Renter Deploy Endpoint with parameter signature overrides fixed (req, res)
+app.post('/api/jobs/deploy', async (req, res) => {
+    try {
+        // 1. Extract parameters safely out of req.body now that parsing handles it cleanly
+        const { targetNodeId } = req.body;
 
-    // 2. DEFINE THE JOB ID FIRST (This fixes the ReferenceError!)
-    // If you are using the 'uuid' package: const jobId = uuidv4();
-    // If you want a zero-dependency random ID, use this line:
-    const jobId = 'job_' + Math.random().toString(36).substring(2, 11);
+        // 2. Generate clean session deployment tracking IDs
+        const jobId = 'job_' + Math.random().toString(36).substring(2, 11);
 
-    // 3. Find your active node from your network registry array/database
-    // (Ensure your node targeting lookup happens here)
-    const targetNode = nodes.find(n => n.id === targetNodeId); 
-    if (!targetNode) {
-        return res.status(404).json({ error: "Target node not found or went offline" });
+        // 3. Look up active target element from onlineNodes tracking registry map
+        const targetNode = onlineNodes.get(targetNodeId); 
+        if (!targetNode || targetNode.status !== "IDLE") {
+            return res.status(404).json({ error: "Target node is currently unavailable or went offline" });
+        }
+
+        // 4. Generate random secure access variables
+        const sessionPassword = Math.random().toString(36).substring(2, 10); 
+        const sshPort = Math.floor(Math.random() * (29999 - 20000 + 1)) + 20000; 
+
+        console.log(`[Orchestrator] Routing SSH Sandbox Job-${jobId} to node: ${targetNodeId}`);
+
+        // Update tracking states
+        targetNode.status = "BUSY";
+
+        // Log transaction record securely inside your PostgreSQL Ledger database rows
+        await pgPool.query(
+            'INSERT INTO compute_jobs (job_id, assigned_node_id, container_image, status) VALUES ($1, $2, $3, $4)',
+            [jobId, targetNodeId, 'linuxserver/openssh-server:latest', 'PROVISIONED']
+        );
+
+        // 5. Dispatch raw instruction over the WebSocket bridge down to client provider binary
+        targetNode.ws.send(JSON.stringify({
+            type: 'EXECUTE_JOB',
+            jobId: jobId,
+            image: 'linuxserver/openssh-server:latest', 
+            password: sessionPassword,
+            assignedPort: sshPort
+        }));
+
+        // 6. Return connection keys cleanly back to frontend client state
+        return res.json({
+            jobId: jobId,
+            executedBy: targetNodeId,
+            status: "PROVISIONED",
+            connectionString: `ssh linuxserver.io@localhost -p ${sshPort}`, 
+            password: sessionPassword
+        });
+        
+    } catch (err) {
+        console.error("[Route Crash Recovery]:", err);
+        return res.status(500).json({ error: "Internal deployment handler framework fault." });
     }
-
-    // 4. Generate random secure session parameters
-    const sessionPassword = Math.random().toString(36).substring(2, 10); // Random 8-character password
-    const sshPort = Math.floor(Math.random() * (29999 - 20000 + 1)) + 20000; // Random port between 20000-29999
-
-    console.log(`[Orchestrator] Routing SSH Sandbox Job-${jobId} to node: ${targetNodeId}`);
-
-    targetNode.status = "BUSY";
-
-    // 5. Dispatch payload over the WebSocket tunnel safely using the defined jobId
-    targetNode.ws.send(JSON.stringify({
-        type: 'EXECUTE_JOB',
-        jobId: jobId,
-        image: 'linuxserver/openssh-server:latest', 
-        password: sessionPassword,
-        assignedPort: sshPort
-    }));
-
-    // 6. Return the credentials back to the React frontend
-    return res.json({
-        jobId: jobId,
-        executedBy: targetNodeId,
-        status: "PROVISIONED",
-        connectionString: `ssh linuxserver.io@localhost -p ${sshPort}`, // Change 'localhost' to your provider's IP later if needed
-        password: sessionPassword
-    });
 });
 
 app.get('/api/jobs/history', async (req, res) => {
