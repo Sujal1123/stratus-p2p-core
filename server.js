@@ -154,32 +154,48 @@ app.get('/api/nodes', async (req, res) => {
 });
 
 // Global Renter Deploy Endpoint with security verification and dynamic location routing
-app.post('/api/jobs/deploy', async (req, res) => {// 1. Generate a random secure 8-character password for this session
-const sessionPassword = uuidv4().substring(0, 8);
-const sshPort = Math.floor(Math.random() * (29999 - 20000 + 1)) + 20000; // Random port between 20000-29999
+app.post('/api/jobs/deploy', async (res, req) => {
+    // 1. Extract parameters from the request body
+    const { userScript, targetNodeId } = req.body;
 
-console.log(`[Orchestrator] Routing SSH Sandbox Job-${jobId} to node: ${targetNodeId}`);
+    // 2. DEFINE THE JOB ID FIRST (This fixes the ReferenceError!)
+    // If you are using the 'uuid' package: const jobId = uuidv4();
+    // If you want a zero-dependency random ID, use this line:
+    const jobId = 'job_' + Math.random().toString(36).substring(2, 11);
 
-targetNode.status = "BUSY";
+    // 3. Find your active node from your network registry array/database
+    // (Ensure your node targeting lookup happens here)
+    const targetNode = nodes.find(n => n.id === targetNodeId); 
+    if (!targetNode) {
+        return res.status(404).json({ error: "Target node not found or went offline" });
+    }
 
-// 2. Dispatch payload with SSH configurations over the WebSocket tunnel
-targetNode.ws.send(JSON.stringify({
-    type: 'EXECUTE_JOB',
-    jobId: jobId,
-    image: 'linuxserver/openssh-server:latest', // Ultra-lightweight secure SSH Linux layer (~20MB)
-    password: sessionPassword,
-    assignedPort: sshPort
-}));
+    // 4. Generate random secure session parameters
+    const sessionPassword = Math.random().toString(36).substring(2, 10); // Random 8-character password
+    const sshPort = Math.floor(Math.random() * (29999 - 20000 + 1)) + 20000; // Random port between 20000-29999
 
-// 3. Save connection metadata so the frontend can display the exact string to the user
-// Modify your final HTTP response down at the bottom of this route:
-return res.json({
-    jobId: jobId,
-    executedBy: targetNodeId,
-    status: "PROVISIONED",
-    connectionString: `ssh linuxserver.io@YOUR_PROVIDER_PUBLIC_IP -p ${sshPort}`, // We will swap this dynamically
-    password: sessionPassword
-});});
+    console.log(`[Orchestrator] Routing SSH Sandbox Job-${jobId} to node: ${targetNodeId}`);
+
+    targetNode.status = "BUSY";
+
+    // 5. Dispatch payload over the WebSocket tunnel safely using the defined jobId
+    targetNode.ws.send(JSON.stringify({
+        type: 'EXECUTE_JOB',
+        jobId: jobId,
+        image: 'linuxserver/openssh-server:latest', 
+        password: sessionPassword,
+        assignedPort: sshPort
+    }));
+
+    // 6. Return the credentials back to the React frontend
+    return res.json({
+        jobId: jobId,
+        executedBy: targetNodeId,
+        status: "PROVISIONED",
+        connectionString: `ssh linuxserver.io@localhost -p ${sshPort}`, // Change 'localhost' to your provider's IP later if needed
+        password: sessionPassword
+    });
+});
 
 app.get('/api/jobs/history', async (req, res) => {
     try {
