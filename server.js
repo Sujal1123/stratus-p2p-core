@@ -154,79 +154,32 @@ app.get('/api/nodes', async (req, res) => {
 });
 
 // Global Renter Deploy Endpoint with security verification and dynamic location routing
-app.post('/api/jobs/deploy', async (req, res) => {
-    const renterToken = req.headers['authorization']; 
+app.post('/api/jobs/deploy', async (req, res) => {// 1. Generate a random secure 8-character password for this session
+const sessionPassword = uuidv4().substring(0, 8);
+const sshPort = Math.floor(Math.random() * (29999 - 20000 + 1)) + 20000; // Random port between 20000-29999
 
-    if (!renterToken) {
-        return res.status(401).json({ error: "Access Denied: Missing valid credentials in Authorization header." });
-    }
+console.log(`[Orchestrator] Routing SSH Sandbox Job-${jobId} to node: ${targetNodeId}`);
 
-    const cleanToken = renterToken.replace('Bearer ', '').trim();
-    const { userScript, targetNodeId } = req.body;
+targetNode.status = "BUSY";
 
-    const cleanScript = userScript || "";
-
-    if (!targetNodeId) {
-        return res.status(400).json({ error: "You must specify a targetNodeId to route your computation globally." });
-    }
-
-    try {
-        const renterCheck = await pgPool.query('SELECT user_id FROM users WHERE api_key = $1', [cleanToken]);
-        if (renterCheck.rows.length === 0) {
-            return res.status(403).json({ error: "Authentication failed: Invalid credentials." });
-        }
-
-        if (!onlineNodes.has(targetNodeId)) {
-            return res.status(503).json({ error: `Target node ${targetNodeId} is currently offline across the global mesh.` });
-        }
-
-        const targetNode = onlineNodes.get(targetNodeId);
-
-        if (targetNode.status !== "IDLE") {
-            return res.status(429).json({ error: `Target node ${targetNodeId} is currently busy processing another workload.` });
-        }
-
-        const jobId = uuidv4().substring(0, 8);
-        console.log(`[Orchestrator] Routing global Job-${jobId} straight to infrastructure node: ${targetNodeId}`);
-        
-        targetNode.status = "BUSY";
-
-        targetNode.ws.send(JSON.stringify({
+// 2. Dispatch payload with SSH configurations over the WebSocket tunnel
+targetNode.ws.send(JSON.stringify({
     type: 'EXECUTE_JOB',
     jobId: jobId,
-    image: 'dorowu/ubuntu-desktop-lxde-vnc', // Pre-packaged Ubuntu OS with a full web GUI engine
-    command: "" // No explicit script execution needed; they will control it manually!
+    image: 'linuxserver/openssh-server:latest', // Ultra-lightweight secure SSH Linux layer (~20MB)
+    password: sessionPassword,
+    assignedPort: sshPort
 }));
 
-        const executionPromise = new Promise((resolve) => {
-            activeJobs.set(jobId, resolve);
-        });
-
-        const outputLogs = await executionPromise;
-
-        try {
-            await pgPool.query(
-                `INSERT INTO compute_jobs (job_id, assigned_node_id, container_image, status, output_logs) 
-                 VALUES ($1, $2, $3, $4, $5)`,
-                [jobId, targetNodeId, 'python:3.10-slim', 'COMPLETED', outputLogs]
-            );
-            console.log(`[Storage] Globally routed Job-${jobId} written permanently to PostgreSQL ledger.`);
-        } catch (dbErr) {
-            console.error('Failed to log transaction metadata to PostgreSQL:', dbErr);
-        }
-
-        return res.json({
-            jobId: jobId,
-            executedBy: targetNodeId,
-            output: outputLogs,
-            status: "VERIFIED_COMPLETION"
-        });
-
-    } catch (error) {
-        console.error("Global routing pipeline execution failure:", error);
-        return res.status(500).json({ error: "Internal coordination mesh failure running global script." });
-    }
-});
+// 3. Save connection metadata so the frontend can display the exact string to the user
+// Modify your final HTTP response down at the bottom of this route:
+return res.json({
+    jobId: jobId,
+    executedBy: targetNodeId,
+    status: "PROVISIONED",
+    connectionString: `ssh linuxserver.io@YOUR_PROVIDER_PUBLIC_IP -p ${sshPort}`, // We will swap this dynamically
+    password: sessionPassword
+});});
 
 app.get('/api/jobs/history', async (req, res) => {
     try {
