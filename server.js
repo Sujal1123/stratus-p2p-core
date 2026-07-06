@@ -178,32 +178,32 @@ app.post('/api/jobs/deploy', async (req, res) => {
         const sessionPassword = Math.random().toString(36).substring(2, 10); 
         const sshPort = Math.floor(Math.random() * (29999 - 20000 + 1)) + 20000; 
 
-        console.log(`[Orchestrator] Routing SSH Sandbox Job-${jobId} to node: ${targetNodeId}`);
+        console.log(`[Orchestrator] Routing Alpine SSH Sandbox Job-${jobId} to node: ${targetNodeId}`);
 
         // Update tracking states
         targetNode.status = "BUSY";
 
-        // Log transaction record securely inside your PostgreSQL Ledger database rows
+        // Log transaction record securely inside your PostgreSQL Ledger database rows using alpine image name
         await pgPool.query(
             'INSERT INTO compute_jobs (job_id, assigned_node_id, container_image, status) VALUES ($1, $2, $3, $4)',
-            [jobId, targetNodeId, 'linuxserver/openssh-server:latest', 'PROVISIONED']
+            [jobId, targetNodeId, 'alpine:latest', 'PROVISIONED']
         );
 
         // 5. Dispatch raw instruction over the WebSocket bridge down to client provider binary
         targetNode.ws.send(JSON.stringify({
             type: 'EXECUTE_JOB',
             jobId: jobId,
-            image: 'linuxserver/openssh-server:latest', 
+            image: 'alpine:latest', // Pointing to ultra-fast 5MB alpine image layer
             password: sessionPassword,
             assignedPort: sshPort
         }));
 
-        // 6. Return connection keys cleanly back to frontend client state
+        // 6. Return connection keys cleanly back to frontend client state with user set to root
         return res.json({
             jobId: jobId,
             executedBy: targetNodeId,
             status: "PROVISIONED",
-            connectionString: `ssh linuxserver.io@localhost -p ${sshPort}`, 
+            connectionString: `ssh root@127.0.0.1 -p ${sshPort}`, 
             password: sessionPassword
         });
         
