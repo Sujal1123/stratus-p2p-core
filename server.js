@@ -178,27 +178,27 @@ app.post('/api/jobs/deploy', async (req, res) => {
         const sessionPassword = Math.random().toString(36).substring(2, 10); 
         const sshPort = Math.floor(Math.random() * (29999 - 20000 + 1)) + 20000; 
 
-        console.log(`[Orchestrator] Routing Alpine SSH Sandbox Job-${jobId} to node: ${targetNodeId}`);
+        console.log(`[Orchestrator] Routing Forced-Password SSH Sandbox Job-${jobId} to node: ${targetNodeId}`);
 
         // Update tracking states
         targetNode.status = "BUSY";
 
-        // Log transaction record securely inside your PostgreSQL Ledger database rows using alpine image name
+        // Log transaction record securely inside your PostgreSQL Ledger database rows using linuxserver image name
         await pgPool.query(
             'INSERT INTO compute_jobs (job_id, assigned_node_id, container_image, status) VALUES ($1, $2, $3, $4)',
-            [jobId, targetNodeId, 'alpine:latest', 'PROVISIONED']
+            [jobId, targetNodeId, 'linuxserver/openssh-server:latest', 'PROVISIONED']
         );
 
         // 5. Dispatch raw instruction over the WebSocket bridge down to client provider binary
         targetNode.ws.send(JSON.stringify({
             type: 'EXECUTE_JOB',
             jobId: jobId,
-            image: 'danielguerra/alpine-sshd:latest', // Pointing to ultra-fast 5MB alpine image layer
+            image: 'linuxserver/openssh-server:latest', // Pointing back to stable OpenSSH container core
             password: sessionPassword,
             assignedPort: sshPort
         }));
 
-        // 6. Return connection keys cleanly back to frontend client state with user set to root
+        // 6. Return connection keys cleanly back to frontend client state with root access configuration pointers
         return res.json({
             jobId: jobId,
             executedBy: targetNodeId,
