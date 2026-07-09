@@ -193,7 +193,7 @@ app.post('/api/jobs/deploy', async (req, res) => {
         targetNode.ws.send(JSON.stringify({
             type: 'EXECUTE_JOB',
             jobId: jobId,
-            image: 'alpine:latest', // Pointing to ultra-fast 5MB alpine image layer
+            image: 'danielguerra/alpine-sshd:latest', // Pointing to ultra-fast 5MB alpine image layer
             password: sessionPassword,
             assignedPort: sshPort
         }));
