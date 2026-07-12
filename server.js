@@ -108,11 +108,24 @@ wss.on('connection', async (ws, req) => {
         
         if (data.type === 'HEARTBEAT') {
             const redisKey = `node:status:Node-${nodeId}`;
+            
+            // 🎯 Extracts real-time telemetry elements safely from your updated heartbeat payload channel
+            const cpuLoad = data.metrics?.cpuLoad !== undefined ? data.metrics.cpuLoad : 0;
+            const freeMem = data.metrics?.freeMem !== undefined ? data.metrics.freeMem : 0;
+            const totalMemGB = data.metrics?.totalMemGB || 16;
+            
             await redisClient.set(redisKey, JSON.stringify({
                 id: `Node-${nodeId}`,
-                specs: { cpu: 1, ram: "2GB" }, 
+                specs: { 
+                    cpu: 1, 
+                    ram: `${totalMemGB}GB` 
+                },
+                telemetry: {
+                    cpuLoad: `${cpuLoad}%`,
+                    freeMemory: `${freeMem}%`
+                },
                 status: onlineNodes.get(`Node-${nodeId}`)?.status || "IDLE"
-            }), { EX: 25 });
+            }), { EX: 12 }); // Lowers expiration tolerance envelope to synchronize tight 5-second updates
             return;
         }
 
@@ -176,17 +189,17 @@ app.post('/api/jobs/deploy', async (req, res) => {
         console.log(`[Orchestrator] Routing Alpine SSH Sandbox Job-${jobId} to node: ${targetNodeId}`);
         targetNode.status = "BUSY";
 
-        // Synced image name logging parameter inside db query target
+        // Synced image name logging parameter inside db query target to read alpine:latest cleanly
         await pgPool.query(
             'INSERT INTO compute_jobs (job_id, assigned_node_id, container_image, status) VALUES ($1, $2, $3, $4)',
-            [jobId, targetNodeId, 'danielguerra/alpine-sshd:latest', 'PROVISIONED']
+            [jobId, targetNodeId, 'alpine:latest', 'PROVISIONED']
         );
 
-        // Dispatches the exact target package image name payload string
+        // Dispatches matching configuration array down the WS pipeline tunnel
         targetNode.ws.send(JSON.stringify({
             type: 'EXECUTE_JOB',
             jobId: jobId,
-            image: 'alpine:latest', // Make sure this matches in both targetNode.ws.send and pgPool.query blocks 
+            image: 'alpine:latest', 
             password: sessionPassword,
             assignedPort: sshPort
         }));
