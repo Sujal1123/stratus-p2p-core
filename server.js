@@ -186,7 +186,7 @@ app.post('/api/jobs/deploy', async (req, res) => {
         targetNode.ws.send(JSON.stringify({
             type: 'EXECUTE_JOB',
             jobId: jobId,
-            image: 'danielguerra/alpine-sshd:latest', 
+            image: 'alpine:latest', // Make sure this matches in both targetNode.ws.send and pgPool.query blocks 
             password: sessionPassword,
             assignedPort: sshPort
         }));
