@@ -5,6 +5,12 @@ const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
 const redis = require('redis');
 const { Pool } = require('pg');
+const crypto = require('crypto');
+
+// Helper to generate a dynamic, short session access token
+function generateSessionToken() {
+    return 'stratus-' + crypto.randomBytes(3).toString('hex');
+}
 
 // 1. Dynamic PostgreSQL Connection Pool with secure SSL handling overrides
 const pgPool = new Pool({
@@ -94,63 +100,81 @@ wss.on('connection', async (ws, req) => {
 
     const providerId = userCheck.rows[0].user_id;
     const nodeId = uuidv4().substring(0, 8);
-    console.log(`[Network] Node authorized successfully! Assigned ID: Node-${nodeId} (Tied to User: ${providerId})`);
+    
+    // 🔑 Generate dynamic session token for this online session
+    const activeSessionToken = generateSessionToken();
 
-    // Map the socket connection with permission scope
+    console.log(`[Network] Node authorized successfully! Assigned ID: Node-${nodeId} (Active Token: ${activeSessionToken})`);
+
+    // Map the socket connection with permission scope and session token
     onlineNodes.set(`Node-${nodeId}`, {
         ws: ws,
         ownerId: providerId,
+        sessionToken: activeSessionToken,
         status: "IDLE"
     });
 
-    ws.on('message', async (message) => {
-        const data = JSON.parse(message);
-        
-        if (data.type === 'HEARTBEAT') {
-            const redisKey = `node:status:Node-${nodeId}`;
-            
-            // 🎯 Extracts real-time telemetry elements safely from your updated heartbeat payload channel
-            const cpuLoad = data.metrics?.cpuLoad !== undefined ? data.metrics.cpuLoad : 0;
-            const freeMem = data.metrics?.freeMem !== undefined ? data.metrics.freeMem : 0;
-            const totalMemGB = data.metrics?.totalMemGB || 16;
-            
-            await redisClient.set(redisKey, JSON.stringify({
-                id: `Node-${nodeId}`,
-                specs: { 
-                    cpu: 1, 
-                    ram: `${totalMemGB}GB` 
-                },
-                telemetry: {
-                    cpuLoad: `${cpuLoad}%`,
-                    freeMemory: `${freeMem}%`
-                },
-                status: onlineNodes.get(`Node-${nodeId}`)?.status || "IDLE"
-            }), { EX: 12 }); // Lowers expiration tolerance envelope to synchronize tight 5-second updates
-            return;
-        }
+    // Notify the provider terminal of their session token
+    ws.send(JSON.stringify({
+        type: 'SESSION_INITIALIZED',
+        token: activeSessionToken,
+        nodeId: `Node-${nodeId}`
+    }));
 
-        if (data.type === 'JOB_FINISHED') {
-            console.log(`[Network] Received compilation logs from Node-${nodeId}`);
-            const jobResolver = activeJobs.get(data.jobId);
-            if (jobResolver) {
-                jobResolver(data.output);
-                activeJobs.delete(data.jobId);
-            }
-            if (onlineNodes.has(`Node-${nodeId}`)) {
-                onlineNodes.get(`Node-${nodeId}`).status = "IDLE";
-            }
+    ws.on('message', async (message) => {
+        try {
+            const data = JSON.parse(message);
             
-            // Update table state row to completed
-            await pgPool.query(
-                'UPDATE compute_jobs SET status = $1 WHERE job_id = $2',
-                ['COMPLETED', data.jobId]
-            );
+            if (data.type === 'HEARTBEAT') {
+                const redisKey = `node:status:Node-${nodeId}`;
+                
+                // Extracts real-time telemetry elements safely
+                const cpuLoad = data.metrics?.cpuLoad !== undefined ? data.metrics.cpuLoad : 0;
+                const freeMem = data.metrics?.freeMem !== undefined ? data.metrics.freeMem : 0;
+                const totalMemGB = data.metrics?.totalMemGB || 16;
+                
+                await redisClient.set(redisKey, JSON.stringify({
+                    id: `Node-${nodeId}`,
+                    sessionToken: activeSessionToken,
+                    specs: { 
+                        cpu: 1, 
+                        ram: `${totalMemGB}GB` 
+                    },
+                    telemetry: {
+                        cpuLoad: `${cpuLoad}%`,
+                        freeMemory: `${freeMem}%`
+                    },
+                    status: onlineNodes.get(`Node-${nodeId}`)?.status || "IDLE"
+                }), { EX: 12 });
+                return;
+            }
+
+            if (data.type === 'JOB_FINISHED') {
+                console.log(`[Network] Received compilation logs from Node-${nodeId}`);
+                const jobResolver = activeJobs.get(data.jobId);
+                if (jobResolver) {
+                    jobResolver(data.output);
+                    activeJobs.delete(data.jobId);
+                }
+                if (onlineNodes.has(`Node-${nodeId}`)) {
+                    onlineNodes.get(`Node-${nodeId}`).status = "IDLE";
+                }
+                
+                // Update table state row to completed
+                await pgPool.query(
+                    'UPDATE compute_jobs SET status = $1 WHERE job_id = $2',
+                    ['COMPLETED', data.jobId]
+                );
+            }
+        } catch (err) {
+            console.error('[WS Parse Error]:', err.message);
         }
     });
 
     ws.on('close', () => {
         console.log(`[Network] Host Node-${nodeId} went offline.`);
         onlineNodes.delete(`Node-${nodeId}`);
+        redisClient.del(`node:status:Node-${nodeId}`);
     });
 });
 
@@ -176,11 +200,19 @@ app.get('/api/nodes', async (req, res) => {
 app.post('/api/jobs/deploy', async (req, res) => {
     try {
         const { targetNodeId } = req.body;
-        const jobId = uuidv4();
+        const authHeader = req.headers['authorization'];
+        const providedToken = authHeader ? authHeader.replace('Bearer ', '').trim() : '';
 
+        const jobId = uuidv4();
         const targetNode = onlineNodes.get(targetNodeId);
+
         if (!targetNode || targetNode.status !== "IDLE") {
-            return res.status(404).json({ error: "Target node is currently unavailable or went offline" });
+            return res.status(404).json({ error: "Target node is currently unavailable or went offline." });
+        }
+
+        // 🔐 Validate dynamic session access token
+        if (providedToken !== targetNode.sessionToken) {
+            return res.status(401).json({ error: "Invalid or expired Gateway Access Token for this node." });
         }
 
         const sessionPassword = Math.random().toString(36).substring(2, 10);
@@ -189,7 +221,6 @@ app.post('/api/jobs/deploy', async (req, res) => {
         console.log(`[Orchestrator] Routing Alpine SSH Sandbox Job-${jobId} to node: ${targetNodeId}`);
         targetNode.status = "BUSY";
 
-        // Synced image name logging parameter inside db query target to read alpine:latest cleanly
         await pgPool.query(
             'INSERT INTO compute_jobs (job_id, assigned_node_id, container_image, status) VALUES ($1, $2, $3, $4)',
             [jobId, targetNodeId, 'alpine:latest', 'PROVISIONED']
