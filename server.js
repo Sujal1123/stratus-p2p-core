@@ -106,7 +106,7 @@ wss.on('connection', async (ws, req) => {
 
     console.log(`[Network] Node authorized successfully! Assigned ID: Node-${nodeId} (Active Token: ${activeSessionToken})`);
 
-    // Map the socket connection with permission scope and session token
+    // Map the socket connection in memory with permission scope and session token
     onlineNodes.set(`Node-${nodeId}`, {
         ws: ws,
         ownerId: providerId,
@@ -114,7 +114,7 @@ wss.on('connection', async (ws, req) => {
         status: "IDLE"
     });
 
-    // Notify the provider terminal of their session token
+    // Notify ONLY the provider terminal of their private session token
     ws.send(JSON.stringify({
         type: 'SESSION_INITIALIZED',
         token: activeSessionToken,
@@ -133,9 +133,9 @@ wss.on('connection', async (ws, req) => {
                 const freeMem = data.metrics?.freeMem !== undefined ? data.metrics.freeMem : 0;
                 const totalMemGB = data.metrics?.totalMemGB || 16;
                 
+                // 🔒 DO NOT include sessionToken here to keep it hidden from public node lists
                 await redisClient.set(redisKey, JSON.stringify({
                     id: `Node-${nodeId}`,
-                    sessionToken: activeSessionToken,
                     specs: { 
                         cpu: 1, 
                         ram: `${totalMemGB}GB` 
@@ -182,21 +182,44 @@ wss.on('connection', async (ws, req) => {
 
 app.get('/api/nodes', async (req, res) => {
     try {
-        const keys = await redisClient.keys('node:status:*');
         const nodesList = [];
-        
-        for (const key of keys) {
-            const data = await redisClient.get(key);
-            if (data) nodesList.push(JSON.parse(data));
+        const seenNodeIds = new Set();
+
+        // 1. Try reading from Redis first
+        try {
+            const keys = await redisClient.keys('node:status:*');
+            for (const key of keys) {
+                const data = await redisClient.get(key);
+                if (data) {
+                    const parsed = JSON.parse(data);
+                    nodesList.push(parsed);
+                    seenNodeIds.add(parsed.id);
+                }
+            }
+        } catch (redisErr) {
+            console.error('[Redis Read Warning]:', redisErr.message);
         }
-        
+
+        // 2. Fallback to active in-memory Map (onlineNodes) if Redis missed anything
+        for (const [nodeId, nodeData] of onlineNodes.entries()) {
+            if (!seenNodeIds.has(nodeId)) {
+                nodesList.push({
+                    id: nodeId,
+                    specs: { cpu: 1, ram: "16GB" },
+                    telemetry: { cpuLoad: "0%", freeMemory: "100%" },
+                    status: nodeData.status || "IDLE"
+                });
+            }
+        }
+
         res.json(nodesList);
     } catch (err) {
+        console.error('[Nodes Route Error]:', err);
         res.status(500).json({ error: "Failed to read network grid map." });
     }
 });
 
-// Global Renter Deploy Endpoint with parameter signature overrides fixed (req, res)
+// Global Renter Deploy Endpoint
 app.post('/api/jobs/deploy', async (req, res) => {
     try {
         const { targetNodeId } = req.body;
@@ -210,7 +233,7 @@ app.post('/api/jobs/deploy', async (req, res) => {
             return res.status(404).json({ error: "Target node is currently unavailable or went offline." });
         }
 
-        // 🔐 Validate dynamic session access token
+        // 🔐 Validate dynamic session access token against private memory map
         if (providedToken !== targetNode.sessionToken) {
             return res.status(401).json({ error: "Invalid or expired Gateway Access Token for this node." });
         }
