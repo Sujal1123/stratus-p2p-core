@@ -232,30 +232,39 @@ app.get('/api/nodes', async (req, res) => {
         const nodesList = [];
         const seenNodeIds = new Set();
 
-        // 1. Try reading from Redis first
-        try {
-            const keys = await redisClient.keys('node:status:*');
-            for (const key of keys) {
-                const data = await redisClient.get(key);
-                if (data) {
-                    const parsed = JSON.parse(data);
-                    nodesList.push(parsed);
-                    seenNodeIds.add(parsed.id);
+        // 1. Try reading live node snapshots from Redis first
+        if (redisClient && redisClient.isReady) {
+            try {
+                const keys = await redisClient.keys('node:status:*');
+                for (const key of keys) {
+                    const data = await redisClient.get(key);
+                    if (data) {
+                        const parsed = JSON.parse(data);
+                        nodesList.push(parsed);
+                        // Save both the full ID ("Node-xyz") and plain string to prevent duplicate fallback entries
+                        seenNodeIds.add(parsed.id);
+                        if (parsed.id.startsWith('Node-')) {
+                            seenNodeIds.add(parsed.id.replace('Node-', ''));
+                        }
+                    }
                 }
+            } catch (redisErr) {
+                console.error('[Redis Read Warning]:', redisErr.message);
             }
-        } catch (redisErr) {
-            console.error('[Redis Read Warning]:', redisErr.message);
         }
 
-        // 2. Fallback to active in-memory Map (onlineNodes) if Redis missed anything
-        for (const [nodeId, nodeData] of onlineNodes.entries()) {
-            if (!seenNodeIds.has(nodeId)) {
+        // 2. Fallback to active in-memory Map (onlineNodes) if Redis is offline or missed active sockets
+        for (const [rawNodeId, nodeData] of onlineNodes.entries()) {
+            const formattedId = rawNodeId.startsWith('Node-') ? rawNodeId : `Node-${rawNodeId}`;
+            
+            if (!seenNodeIds.has(formattedId) && !seenNodeIds.has(rawNodeId)) {
                 nodesList.push({
-                    id: nodeId,
-                    specs: { cpu: 1, ram: "16GB" },
-                    telemetry: { cpuLoad: "0%", freeMemory: "100%" },
+                    id: formattedId,
+                    specs: nodeData.specs || { cpu: 1, ram: "16GB" },
+                    telemetry: nodeData.telemetry || { cpuLoad: "0%", freeMemory: "100%" },
                     status: nodeData.status || "IDLE"
                 });
+                seenNodeIds.add(formattedId);
             }
         }
 
