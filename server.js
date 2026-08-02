@@ -298,17 +298,32 @@ app.post('/api/jobs/deploy', async (req, res) => {
 
         targetNode.status = "BUSY";
 
-        await pgPool.query(
-            'INSERT INTO compute_jobs (job_id, assigned_node_id, container_image, status) VALUES ($1, $2, $3, $4)',
-            [jobId, targetNodeId, 'alpine:latest', 'PROVISIONED']
-        );
+        // Record job entry in PostgreSQL
+        try {
+            await pgPool.query(
+                'INSERT INTO compute_jobs (job_id, assigned_node_id, container_image, status) VALUES ($1, $2, $3, $4)',
+                [jobId, targetNodeId, 'alpine:latest', 'PROVISIONED']
+            );
+        } catch (dbErr) {
+            console.error('[DB Insert Error]:', dbErr.message);
+        }
 
-        // Store resolver to await tunnel registration from provider
-        const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 8000));
+        // Set up promise listener for the tunnel setup from provider
+        let tunnelResolver;
         const tunnelPromise = new Promise((resolve) => {
+            tunnelResolver = resolve;
             activeJobs.set(`tunnel-${jobId}`, resolve);
         });
 
+        // Timeout fallback after 10 seconds if Ngrok fails/lags
+        const timeoutPromise = new Promise((resolve) => {
+            setTimeout(() => {
+                activeJobs.delete(`tunnel-${jobId}`);
+                resolve(null);
+            }, 10000);
+        });
+
+        // Dispatch job payload to provider via WebSocket
         targetNode.ws.send(JSON.stringify({
             type: 'EXECUTE_JOB',
             jobId: jobId,
@@ -317,10 +332,11 @@ app.post('/api/jobs/deploy', async (req, res) => {
             assignedPort: sshPort
         }));
 
-        // Wait for ngrok public tunnel URL
+        // Wait for Ngrok public tunnel response or timeout
         const publicTunnelUrl = await Promise.race([tunnelPromise, timeoutPromise]);
         
         let sshConnectionString = `ssh root@127.0.0.1 -p ${sshPort}`;
+        
         if (publicTunnelUrl && typeof publicTunnelUrl === 'string') {
             // Converts "tcp://4.tcp.ngrok.io:12345" to "ssh root@4.tcp.ngrok.io -p 12345"
             const cleaned = publicTunnelUrl.replace('tcp://', '');
