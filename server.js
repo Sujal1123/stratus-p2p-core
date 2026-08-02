@@ -183,6 +183,17 @@ wss.on('connection', async (ws, req) => {
                 return;
             }
 
+            // 🌐 Handle Cross-Network Tunnel Registration from Provider Agent
+            if (data.type === 'TUNNEL_ESTABLISHED') {
+                console.log(`[Network] Tunnel registered for Job-${data.jobId}: ${data.publicUrl}`);
+                const tunnelResolver = activeJobs.get(`tunnel-${data.jobId}`);
+                if (tunnelResolver) {
+                    tunnelResolver(data.publicUrl);
+                    activeJobs.delete(`tunnel-${data.jobId}`);
+                }
+                return;
+            }
+
             if (data.type === 'JOB_FINISHED') {
                 console.log(`[Network] Received compilation logs from Node-${nodeId}`);
                 const jobResolver = activeJobs.get(data.jobId);
@@ -266,18 +277,16 @@ app.post('/api/jobs/deploy', async (req, res) => {
         const targetNode = onlineNodes.get(targetNodeId);
 
         if (!targetNode || targetNode.status !== "IDLE") {
-            return res.status(404).json({ error: "Target node is currently unavailable or went offline." });
+            return res.status(404).json({ error: "Target node is currently unavailable or offline." });
         }
 
-        // 🔐 Validate dynamic session access token against private memory map
         if (providedToken !== targetNode.sessionToken) {
-            return res.status(401).json({ error: "Invalid or expired Gateway Access Token for this node." });
+            return res.status(401).json({ error: "Invalid Gateway Access Token." });
         }
 
         const sessionPassword = Math.random().toString(36).substring(2, 10);
         const sshPort = Math.floor(Math.random() * (29999 - 20000 + 1)) + 20000;
 
-        console.log(`[Orchestrator] Routing Alpine SSH Sandbox Job-${jobId} to node: ${targetNodeId}`);
         targetNode.status = "BUSY";
 
         await pgPool.query(
@@ -285,7 +294,12 @@ app.post('/api/jobs/deploy', async (req, res) => {
             [jobId, targetNodeId, 'alpine:latest', 'PROVISIONED']
         );
 
-        // Dispatches matching configuration array down the WS pipeline tunnel
+        // Store resolver to await tunnel registration from provider
+        const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 8000));
+        const tunnelPromise = new Promise((resolve) => {
+            activeJobs.set(`tunnel-${jobId}`, resolve);
+        });
+
         targetNode.ws.send(JSON.stringify({
             type: 'EXECUTE_JOB',
             jobId: jobId,
@@ -294,17 +308,28 @@ app.post('/api/jobs/deploy', async (req, res) => {
             assignedPort: sshPort
         }));
 
+        // Wait for ngrok public tunnel URL
+        const publicTunnelUrl = await Promise.race([tunnelPromise, timeoutPromise]);
+        
+        let sshConnectionString = `ssh root@127.0.0.1 -p ${sshPort}`;
+        if (publicTunnelUrl && typeof publicTunnelUrl === 'string') {
+            // Converts "tcp://4.tcp.ngrok.io:12345" to "ssh root@4.tcp.ngrok.io -p 12345"
+            const cleaned = publicTunnelUrl.replace('tcp://', '');
+            const [host, port] = cleaned.split(':');
+            sshConnectionString = `ssh root@${host} -p ${port}`;
+        }
+
         return res.json({
             jobId: jobId,
             executedBy: targetNodeId,
             status: "PROVISIONED",
-            connectionString: `ssh root@127.0.0.1 -p ${sshPort}`,
+            connectionString: sshConnectionString,
             password: sessionPassword
         });
         
     } catch (err) {
-        console.error("[Route Crash Recovery]:", err);
-        return res.status(500).json({ error: "Internal deployment handler framework fault." });
+        console.error("[Route Error]:", err);
+        return res.status(500).json({ error: "Deployment handler failure." });
     }
 });
 
