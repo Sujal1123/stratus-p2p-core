@@ -1,5 +1,5 @@
 const express = require('express');
-const http = require('http'); // Built-in node module to attach our WS server
+const http = require('http');
 const { WebSocketServer } = require('ws');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
@@ -7,18 +7,15 @@ const redis = require('redis');
 const { Pool } = require('pg');
 const crypto = require('crypto');
 
-// Helper to generate a dynamic, short session access token
 function generateSessionToken() {
     return 'stratus-' + crypto.randomBytes(3).toString('hex');
 }
 
-// 1. Dynamic PostgreSQL Connection Pool with secure SSL handling overrides
 const pgPool = new Pool({
     connectionString: process.env.DATABASE_URL || 'postgresql://postgres:@localhost:5432/stratus_p2p',
     ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// Create tables and seed mock users automatically on startup
 (async () => {
     try {
         await pgPool.query(`
@@ -45,35 +42,34 @@ const pgPool = new Pool({
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         `);
-        console.log('[Control-Plane] All PostgreSQL tables and seed data initialized smoothly.');
+        console.log('[Control-Plane] PostgreSQL tables initialized.');
     } catch (err) {
-        console.error('PostgreSQL initialization failure:', err);
+        console.error('PostgreSQL initialization failure:', err.message);
     }
 })();
 
 const app = express();
-app.use(express.json()); // Essential body parser module config
+app.use(express.json());
 app.use(cors());
 
-// Dynamic tracking loops
 const onlineNodes = new Map();
 const activeJobs = new Map();  
 
-// 2. Dynamic Redis Connection Pipeline Configuration
 const redisClient = redis.createClient({
     url: process.env.REDIS_URL || 'redis://localhost:6379'
 });
 
-redisClient.on('error', (err) => console.error('Redis Client Error', err));
+redisClient.on('error', (err) => console.error('Redis Client Error:', err.message));
 (async () => {
-    await redisClient.connect();
-    console.log('[Control-Plane] Connected securely to Redis.');
+    try {
+        await redisClient.connect();
+        console.log('[Control-Plane] Connected to Redis.');
+    } catch (err) {
+        console.error('[Control-Plane] Redis connect warning:', err.message);
+    }
 })();
 
-// Create an HTTP native server to encapsulate both Express endpoints and WS traffic streams
 const server = http.createServer(app);
-
-// 3. Attach WebSocket server onto the SAME unified HTTP server port line
 const wss = new WebSocketServer({ noServer: true });
 
 server.on('upgrade', (request, socket, head) => {
@@ -88,7 +84,6 @@ wss.on('connection', async (ws, req) => {
 
     let providerId = null;
 
-    // 1. Validate incoming hardware credentials against PostgreSQL with try/catch safety
     try {
         const userCheck = await pgPool.query(
             'SELECT user_id FROM users WHERE api_key = $1', [nodeToken]
@@ -97,29 +92,25 @@ wss.on('connection', async (ws, req) => {
             providerId = userCheck.rows[0].user_id;
         }
     } catch (dbErr) {
-        console.error('[DB Auth Check Warning]:', dbErr.message);
+        console.error('[DB Auth Warning]:', dbErr.message);
     }
 
-    // Fallback authentication override for seed API token
     if (!providerId && nodeToken === 'europe_renter_token_abc123') {
         providerId = '00000000-0000-0000-0000-000000000000';
     }
 
     if (!providerId) {
-        console.log(`[Security] Unauthorized connection attempt rejected for token: ${nodeToken}`);
+        console.log(`[Security] Unauthorized connection rejected: ${nodeToken}`);
         ws.send(JSON.stringify({ type: 'AUTH_ERROR', message: 'Invalid node credentials.' }));
         ws.close();
         return;
     }
 
     const nodeId = uuidv4().substring(0, 8);
-    
-    // 🔑 Generate dynamic session token for this online session
     const activeSessionToken = generateSessionToken();
 
-    console.log(`[Network] Node authorized successfully! Assigned ID: Node-${nodeId} (Active Token: ${activeSessionToken})`);
+    console.log(`[Network] Node authorized! Assigned ID: Node-${nodeId} (Token: ${activeSessionToken})`);
 
-    // 2. Map the socket connection in memory with default telemetry specs
     onlineNodes.set(`Node-${nodeId}`, {
         ws: ws,
         ownerId: providerId,
@@ -129,17 +120,15 @@ wss.on('connection', async (ws, req) => {
         specs: { cpu: 1, ram: "16GB" }
     });
 
-    // 3. Immediately seed Redis upon connection (Prevents empty array on GET /api/nodes)
     if (redisClient.isReady) {
         await redisClient.set(`node:status:Node-${nodeId}`, JSON.stringify({
             id: `Node-${nodeId}`,
             specs: { cpu: 1, ram: "16GB" },
             telemetry: { cpuLoad: "0%", freeMemory: "100%" },
             status: "IDLE"
-        }), { EX: 12 });
+        }), { EX: 15 });
     }
 
-    // Notify ONLY the provider terminal of their private session token
     ws.send(JSON.stringify({
         type: 'SESSION_INITIALIZED',
         token: activeSessionToken,
@@ -151,39 +140,27 @@ wss.on('connection', async (ws, req) => {
             const data = JSON.parse(message);
             
             if (data.type === 'HEARTBEAT') {
-                const redisKey = `node:status:Node-${nodeId}`;
-                
-                // Extract real-time telemetry elements safely
                 const cpuLoad = data.metrics?.cpuLoad !== undefined ? data.metrics.cpuLoad : 0;
                 const freeMem = data.metrics?.freeMem !== undefined ? data.metrics.freeMem : 0;
                 const totalMemGB = data.metrics?.totalMemGB || 16;
                 
-                // Update internal memory reference
                 const nodeRef = onlineNodes.get(`Node-${nodeId}`);
                 if (nodeRef) {
                     nodeRef.telemetry = { cpuLoad: `${cpuLoad}%`, freeMemory: `${freeMem}%` };
                     nodeRef.specs = { cpu: 1, ram: `${totalMemGB}GB` };
                 }
 
-                // Sync telemetry to Redis
                 if (redisClient.isReady) {
-                    await redisClient.set(redisKey, JSON.stringify({
+                    await redisClient.set(`node:status:Node-${nodeId}`, JSON.stringify({
                         id: `Node-${nodeId}`,
-                        specs: { 
-                            cpu: 1, 
-                            ram: `${totalMemGB}GB` 
-                        },
-                        telemetry: {
-                            cpuLoad: `${cpuLoad}%`,
-                            freeMemory: `${freeMem}%`
-                        },
+                        specs: { cpu: 1, ram: `${totalMemGB}GB` },
+                        telemetry: { cpuLoad: `${cpuLoad}%`, freeMemory: `${freeMem}%` },
                         status: onlineNodes.get(`Node-${nodeId}`)?.status || "IDLE"
-                    }), { EX: 12 });
+                    }), { EX: 15 });
                 }
                 return;
             }
 
-            // 🌐 Handle Cross-Network Tunnel Registration from Provider Agent
             if (data.type === 'TUNNEL_ESTABLISHED') {
                 console.log(`[Network] Tunnel registered for Job-${data.jobId}: ${data.publicUrl}`);
                 const tunnelResolver = activeJobs.get(`tunnel-${data.jobId}`);
@@ -195,7 +172,6 @@ wss.on('connection', async (ws, req) => {
             }
 
             if (data.type === 'JOB_FINISHED') {
-                console.log(`[Network] Received compilation logs from Node-${nodeId}`);
                 const jobResolver = activeJobs.get(data.jobId);
                 if (jobResolver) {
                     jobResolver(data.output);
@@ -205,11 +181,12 @@ wss.on('connection', async (ws, req) => {
                     onlineNodes.get(`Node-${nodeId}`).status = "IDLE";
                 }
                 
-                // Update table state row to completed
-                await pgPool.query(
-                    'UPDATE compute_jobs SET status = $1 WHERE job_id = $2',
-                    ['COMPLETED', data.jobId]
-                );
+                try {
+                    await pgPool.query(
+                        'UPDATE compute_jobs SET status = $1 WHERE job_id = $2',
+                        ['COMPLETED', data.jobId]
+                    );
+                } catch (dbErr) {}
             }
         } catch (err) {
             console.error('[WS Parse Error]:', err.message);
@@ -232,7 +209,6 @@ app.get('/api/nodes', async (req, res) => {
         const nodesList = [];
         const seenNodeIds = new Set();
 
-        // 1. Try reading live node snapshots from Redis first
         if (redisClient && redisClient.isReady) {
             try {
                 const keys = await redisClient.keys('node:status:*');
@@ -241,7 +217,6 @@ app.get('/api/nodes', async (req, res) => {
                     if (data) {
                         const parsed = JSON.parse(data);
                         nodesList.push(parsed);
-                        // Save both the full ID ("Node-xyz") and plain string to prevent duplicate fallback entries
                         seenNodeIds.add(parsed.id);
                         if (parsed.id.startsWith('Node-')) {
                             seenNodeIds.add(parsed.id.replace('Node-', ''));
@@ -253,7 +228,7 @@ app.get('/api/nodes', async (req, res) => {
             }
         }
 
-        // 2. Fallback to active in-memory Map (onlineNodes) if Redis is offline or missed active sockets
+        // Direct in-memory fallback
         for (const [rawNodeId, nodeData] of onlineNodes.entries()) {
             const formattedId = rawNodeId.startsWith('Node-') ? rawNodeId : `Node-${rawNodeId}`;
             
@@ -275,7 +250,6 @@ app.get('/api/nodes', async (req, res) => {
     }
 });
 
-// Global Renter Deploy Endpoint
 app.post('/api/jobs/deploy', async (req, res) => {
     try {
         const { targetNodeId } = req.body;
@@ -298,7 +272,6 @@ app.post('/api/jobs/deploy', async (req, res) => {
 
         targetNode.status = "BUSY";
 
-        // Record job entry in PostgreSQL
         try {
             await pgPool.query(
                 'INSERT INTO compute_jobs (job_id, assigned_node_id, container_image, status) VALUES ($1, $2, $3, $4)',
@@ -308,14 +281,12 @@ app.post('/api/jobs/deploy', async (req, res) => {
             console.error('[DB Insert Error]:', dbErr.message);
         }
 
-        // Set up promise listener for the tunnel setup from provider
         let tunnelResolver;
         const tunnelPromise = new Promise((resolve) => {
             tunnelResolver = resolve;
             activeJobs.set(`tunnel-${jobId}`, resolve);
         });
 
-        // Timeout fallback after 10 seconds if Ngrok fails/lags
         const timeoutPromise = new Promise((resolve) => {
             setTimeout(() => {
                 activeJobs.delete(`tunnel-${jobId}`);
@@ -323,7 +294,6 @@ app.post('/api/jobs/deploy', async (req, res) => {
             }, 10000);
         });
 
-        // Dispatch job payload to provider via WebSocket
         targetNode.ws.send(JSON.stringify({
             type: 'EXECUTE_JOB',
             jobId: jobId,
@@ -332,13 +302,11 @@ app.post('/api/jobs/deploy', async (req, res) => {
             assignedPort: sshPort
         }));
 
-        // Wait for Ngrok public tunnel response or timeout
         const publicTunnelUrl = await Promise.race([tunnelPromise, timeoutPromise]);
         
         let sshConnectionString = `ssh root@127.0.0.1 -p ${sshPort}`;
         
         if (publicTunnelUrl && typeof publicTunnelUrl === 'string') {
-            // Converts "tcp://4.tcp.ngrok.io:12345" to "ssh root@4.tcp.ngrok.io -p 12345"
             const cleaned = publicTunnelUrl.replace('tcp://', '');
             const [host, port] = cleaned.split(':');
             sshConnectionString = `ssh root@${host} -p ${port}`;
@@ -365,11 +333,10 @@ app.get('/api/jobs/history', async (req, res) => {
         );
         res.json(result.rows);
     } catch (err) {
-        console.error("PostgreSQL query error:", err);
-        res.status(500).json({ error: "Failed to fetch historical database records." });
+        console.error("PostgreSQL query error:", err.message);
+        res.json([]); // Return empty array safely on DB error
     }
 });
 
-// Use Render's assigned port variable or fall back to port 3000
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`[Control-Plane] Orchestration Node listening on port ${PORT}`));
+server.listen(PORT, () => console.log(`[Control-Plane] Listening on port ${PORT}`));
